@@ -2,6 +2,7 @@ from django.test import TestCase
 from sdr.app_settings import AppSettingsKey
 from sdr.utils.geofence_controller import GeofenceController
 from unittest.mock import MagicMock, patch
+import json
 
 
 class GeofenceControllerTestCase(TestCase):
@@ -130,3 +131,136 @@ class GeofenceControllerTestCase(TestCase):
         self.__run_iterations(controller, 4)
 
         mock_apply.assert_not_called()
+
+    @patch("sdr.utils.geofence_controller.MqttSyncClient")
+    @patch.object(GeofenceController, "_GeofenceController__apply")
+    @patch("sdr.utils.geofence_controller.Location")
+    @patch("sdr.utils.geofence_controller.AppSettings")
+    def test_reasserts_applied_state_periodically_even_without_a_transition(self, mock_app_settings, mock_location_cls, mock_apply, mock_mqtt_cls):
+        # tmp_config is not persisted by the scanner and __applied_state only lives in
+        # this thread's memory, so if the scanner restarts while we believe a state is
+        # already applied, nothing would otherwise ever re-publish it. Confirms `run()`
+        # re-invokes `__apply` for the *same* desired state once enough consistent
+        # polls have elapsed since the last apply, even though `__applied_state`
+        # already matches and no transition occurred.
+        debounce = 1
+        mock_app_settings.get.side_effect = self.__settings(debounce)
+        mock_location = MagicMock()
+        mock_location.get_current_location.return_value = (10.0, 10.0)
+        mock_location_cls.return_value = mock_location
+        mock_client = MagicMock()
+        mock_mqtt_cls.return_value = mock_client
+
+        controller = GeofenceController()
+        mock_apply.side_effect = lambda scanning_enabled, client: setattr(controller, "_GeofenceController__applied_state", scanning_enabled)
+        reassert_interval = GeofenceController._GeofenceController__REASSERT_EVERY_N_POLLS
+
+        # First poll applies the transition (debounce=1).
+        self.__run_iterations(controller, 1)
+        mock_apply.assert_called_once()
+
+        # One poll short of the reassertion interval: no re-publish yet.
+        self.__run_iterations(controller, reassert_interval - 1)
+        mock_apply.assert_called_once()
+
+        # The poll that crosses the reassertion interval re-fires apply for the same
+        # (unchanged) desired state.
+        self.__run_iterations(controller, 1)
+        self.assertEqual(mock_apply.call_count, 2)
+
+
+class GeofenceControllerApplyTestCase(TestCase):
+    def __client_replying_with_scanner_id(self, scanner_id="scanner1"):
+        client = MagicMock()
+        client.get_message.return_value = (f"sdr/status/{scanner_id}", None)
+        return client
+
+    def test_apply_pause_path_disables_all_devices_and_publishes_tmp_config(self):
+        controller = GeofenceController()
+        client = self.__client_replying_with_scanner_id()
+        config = {"devices": [{"driver": "rtlsdr", "serial": "1", "enabled": True}, {"driver": "rtlsdr", "serial": "2", "enabled": True}]}
+        client.send_and_get.side_effect = [json.dumps(config), "ok"]  # "sdr/list" fetch, then the tmp_config publish's success reply
+
+        controller._GeofenceController__apply(False, client)
+
+        fetch_call = client.send_and_get.call_args_list[0]
+        self.assertEqual(fetch_call.args[0], "sdr/list")
+        self.assertEqual(fetch_call.args[1], "sdr/status/scanner1")
+
+        publish_call = client.send_and_get.call_args_list[1]
+        self.assertEqual(publish_call.args[0], "sdr/tmp_config/scanner1")
+        self.assertEqual(publish_call.args[1], "sdr/tmp_config/scanner1/success")
+        published_config = json.loads(publish_call.args[2])
+        self.assertTrue(all(device["enabled"] is False for device in published_config["devices"]))
+
+        self.assertEqual(controller._GeofenceController__applied_state, False)
+
+    def test_apply_resume_path_publishes_reset_tmp_config(self):
+        controller = GeofenceController()
+        client = self.__client_replying_with_scanner_id()
+        client.send_and_get.return_value = "ok"
+
+        controller._GeofenceController__apply(True, client)
+
+        client.send_and_get.assert_called_once_with("sdr/reset_tmp_config/scanner1", "sdr/reset_tmp_config/scanner1/success")
+        self.assertEqual(controller._GeofenceController__applied_state, True)
+
+    def test_apply_does_not_update_applied_state_on_failed_resume_reply(self):
+        controller = GeofenceController()
+        client = self.__client_replying_with_scanner_id()
+        client.send_and_get.return_value = None  # timeout / no confirmation
+
+        controller._GeofenceController__apply(True, client)
+
+        self.assertIsNone(controller._GeofenceController__applied_state)
+
+    def test_apply_does_not_update_applied_state_on_failed_pause_publish_reply(self):
+        controller = GeofenceController()
+        client = self.__client_replying_with_scanner_id()
+        config = {"devices": [{"driver": "rtlsdr", "serial": "1", "enabled": True}]}
+        # config fetch succeeds, but the tmp_config publish itself is never confirmed.
+        client.send_and_get.side_effect = [json.dumps(config), None]
+
+        controller._GeofenceController__apply(False, client)
+
+        self.assertIsNone(controller._GeofenceController__applied_state)
+
+    def test_apply_does_not_update_applied_state_when_config_fetch_fails(self):
+        controller = GeofenceController()
+        client = self.__client_replying_with_scanner_id()
+        client.send_and_get.return_value = None  # "sdr/list" fetch itself times out
+
+        controller._GeofenceController__apply(False, client)
+
+        self.assertIsNone(controller._GeofenceController__applied_state)
+        client.send_and_get.assert_called_once()  # never got to the tmp_config publish
+
+    def test_apply_skips_when_scanner_id_cannot_be_discovered(self):
+        controller = GeofenceController()
+        client = MagicMock()
+        client.get_message.return_value = (None, None)  # discovery timed out
+
+        controller._GeofenceController__apply(True, client)
+
+        client.send_and_get.assert_not_called()
+        self.assertIsNone(controller._GeofenceController__applied_state)
+
+    def test_get_scanner_id_discards_stale_reply_on_unrelated_topic(self):
+        # MqttSyncClient has a single shared response slot that isn't cleared before a
+        # new request (common/utils/mqtt.py) - a late reply from an earlier, unrelated
+        # send_and_get can surface here instead of a real "sdr/status/<id>" reply.
+        controller = GeofenceController()
+        client = MagicMock()
+        client.get_message.return_value = ("sdr/tmp_config/scanner1/success", None)
+
+        scanner_id = controller._GeofenceController__get_scanner_id(client)
+
+        self.assertIsNone(scanner_id)
+
+    def test_get_scanner_id_accepts_well_formed_status_topic(self):
+        controller = GeofenceController()
+        client = self.__client_replying_with_scanner_id("scanner1")
+
+        scanner_id = controller._GeofenceController__get_scanner_id(client)
+
+        self.assertEqual(scanner_id, "scanner1")
