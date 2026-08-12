@@ -1,4 +1,5 @@
 from django.test import TestCase
+from itertools import count, repeat
 from sdr.app_settings import AppSettingsKey
 from unittest.mock import MagicMock, patch
 import sdr.utils.location
@@ -57,3 +58,32 @@ class LocationTestCase(TestCase):
         result = sdr.utils.location.Location().get_current_location()
 
         self.assertEqual(result, (51.5, -0.1))
+
+    @patch("sdr.utils.location.time.monotonic")
+    @patch("sdr.utils.location.GPSDClient")
+    @patch("sdr.utils.location.AppSettings")
+    def test_gps_source_gives_up_after_deadline_when_never_fixed(self, mock_app_settings, mock_gpsd_client_cls, mock_monotonic):
+        # gpsd can stay alive and keep emitting "no fix yet" TPV reports (mode 1, no
+        # lat/lon keys) indefinitely - e.g. a cold GPS that never acquires a lock
+        # during the test. gpsdclient's own per-recv socket timeout does NOT bound
+        # this (each read still succeeds, there's just never a fix), so this must be
+        # bounded by our own elapsed-time deadline instead - not by the (here,
+        # infinite) stream running out.
+        mock_app_settings.get.return_value = "gps"
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.__exit__.return_value = False
+        mock_client.dict_stream.return_value = repeat({"class": "TPV", "mode": 1})
+        mock_gpsd_client_cls.return_value = mock_client
+        # first call is the `start` timestamp (0), then advances by 2s per subsequent
+        # call, so the elapsed-time check trips shortly after crossing the 5s deadline
+        # without needing to actually sleep or iterate an unbounded number of times.
+        mock_monotonic.side_effect = count(start=0, step=2)
+
+        result = sdr.utils.location.Location().get_current_location()
+
+        self.assertIsNone(result)
+        # confirms the loop terminated via the deadline check (a small, bounded
+        # number of iterations), not by exhausting the stream - which is infinite
+        # and would otherwise hang forever.
+        self.assertLess(mock_monotonic.call_count, 10)
