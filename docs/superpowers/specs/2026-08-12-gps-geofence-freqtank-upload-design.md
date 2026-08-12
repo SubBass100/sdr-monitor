@@ -179,6 +179,17 @@ New `sdr/utils/freqtank_uploader.py`, structured identically to the existing
   final image with `--build-arg SDR_MONITOR_IMAGE=<our custom-built tag>` against upstream's
   own Dockerfile logic, just forking to touch this single config line.
 
+### Source type: reusing `field_scanner`
+
+`POST /api/field-recordings/upload` (and the GET list/timeline/audio/spectrogram routes)
+hard-check `source_type = 'field_scanner'`. The proper "create a source for this integration"
+flow is Part 2's job (a real FreqTank agent-integration), not this plan's — so for now, the
+FreqTank source this fork's uploader authenticates as is created through FreqTank's *existing*
+Field Scanner Create flow (same UI as Field Scanner itself uses), and its API key configured
+into `FREQTANK_API_KEY`. This works today with zero extra FreqTank server changes beyond the
+`audio_class` fields already in scope below. Part 2 can introduce a distinct `source_type` for
+this integration later if it turns out to matter (e.g. for UI labeling); not a blocker here.
+
 ### FreqTank-side changes (in scope for this plan)
 
 Per explicit direction: carry the AI classification through now and build the Field
