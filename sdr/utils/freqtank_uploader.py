@@ -22,6 +22,8 @@ class FreqTankUploader(threading.Thread):
             out_file = tmp.name
         try:
             decode_audio(t.data_file.path, out_file, t.group.modulation, sample_rate)
+            if os.path.getsize(out_file) == 0:
+                raise Exception("decoded WAV is empty, id: %d" % t.id)
             fields = {
                 "frequency_hz": str(t.middle_frequency()),
                 "mode_key": t.group.modulation,
@@ -38,8 +40,23 @@ class FreqTankUploader(threading.Thread):
             url = AppSettings.get(AppSettingsKey.FREQTANK_SERVER_URL).rstrip("/") + "/api/field-recordings/upload"
             headers = {"X-API-Key": AppSettings.get(AppSettingsKey.FREQTANK_API_KEY)}
             with open(out_file, "rb") as audio_fp:
-                response = requests.post(url, headers=headers, data=fields, files={"audio": ("recording.wav", audio_fp, "audio/wav")}, timeout=30)
-            response.raise_for_status()
+                # allow_redirects=False: requests silently turns a redirected POST into a
+                # GET (dropping the multipart body -- see RFC 7231 and requests' own
+                # redirect handling), so a 301/302/303 from a misconfigured server URL
+                # (e.g. http:// redirecting to https://) would otherwise strip the audio
+                # file from the request while still coming back as a followed-up 2xx.
+                # Surfacing the redirect itself as a non-2xx below ensures that case is
+                # treated as a failure instead of silently confirming an upload that
+                # never actually happened.
+                response = requests.post(
+                    url, headers=headers, data=fields, files={"audio": ("recording.wav", audio_fp, "audio/wav")}, timeout=30, allow_redirects=False
+                )
+            # Deliberately not response.raise_for_status(): that only raises for status
+            # codes >= 400, so a 3xx (redirect) or an out-of-spec 1xx/304 would pass
+            # straight through as "success" without ever confirming FreqTank received
+            # the upload. Require an explicit 2xx before treating this as confirmed.
+            if not (200 <= response.status_code < 300):
+                raise Exception("upload failed, id: %d, status: %d" % (t.id, response.status_code))
             t.uploaded_at = timezone.now()
             t.save()
             self.__logger.info("uploaded, id: %d, frequency: %d Hz" % (t.id, t.middle_frequency()))
