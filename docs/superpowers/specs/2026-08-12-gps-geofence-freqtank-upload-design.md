@@ -10,23 +10,31 @@ finished/in-progress transmissions over MQTT from the scanner, assembles them in
 `Transmission` rows + raw IQ files, and (already, unmodified) runs a background AI classifier
 (YAMNet) that tags each one `Speech`/`Music`/`Noise`/`Unknown`.
 
-This is Part 1 of a 4-part project (tracked informally, not as separate repos yet):
-1. **This plan** — GPS tagging, geofence-gated scanning, FreqTank auto-upload (sdr-monitor fork).
+This is Part 1 of a 3-part project (tracked informally, not as separate repos yet):
+1. **This plan** — GPS tagging, geofence-gated scanning, FreqTank auto-upload including AI
+   voice/noise/music classification (sdr-monitor fork), plus the small FreqTank-side changes
+   needed to accept, store, and filter on that classification (see "FreqTank-side changes").
 2. FreqTank agent-integration + install script to deploy this fork to a remote Pi.
 3. FreqTank remote-config UI (Settings/Network/Upload-style tabs) for this integration.
-4. FreqTank Field Recordings page: a voice/noise filter dropdown, using the `audio_class`
-   data this plan's uploader already carries.
 
-Parts 2-4 are out of scope here and will each get their own brainstorm/plan cycle once this
+(The voice/noise Field Recordings filter was originally planned as a separate Part 4, but per
+explicit direction it's folded into this plan instead, since it's small and the uploader
+already produces the data it needs.)
+
+Parts 2-3 are out of scope here and will each get their own brainstorm/plan cycle once this
 one is built and working.
 
 ## Goal
 
 Bring three Field Scanner capabilities to this fork: live GPS tagging of each recording,
 geofence-gated scanning (only scan when outside a configured area, matching Field Scanner's
-exact semantics), and automatic upload of finished recordings to FreqTank — while reusing as
-much of sdr-monitor's existing architecture (settings, background-thread, MQTT-client
-patterns) as possible rather than introducing new patterns.
+exact semantics), and automatic upload of finished recordings to FreqTank — including the AI
+voice/noise/music classification the fork already computes — while reusing as much of
+sdr-monitor's existing architecture (settings, background-thread, MQTT-client patterns) as
+possible rather than introducing new patterns. FreqTank's Field Recordings page also gets a
+filter for that classification, extending the upload endpoint's contract by exactly the two
+fields needed (see "FreqTank-side changes" below) — everything else about that endpoint's
+existing contract (Field Scanner's own uploads) is untouched and stays backward compatible.
 
 ## Non-goals
 
@@ -39,10 +47,12 @@ patterns) as possible rather than introducing new patterns.
 - **No changes to `rtl-sdr-scanner-cpp`.** The live MQTT `tmp_config`/`reset_tmp_config`
   channel it already exposes (see Architecture) is sufficient for geofence pause/resume
   without touching the DSP engine at all.
-- **No FreqTank-side changes.** The uploader posts to FreqTank's existing
-  `POST /api/field-recordings/upload` — the same endpoint Field Scanner already uses, with
-  the same multipart contract (`audio`, `frequency_hz`, `mode_key`, `started_at`,
-  `duration_ms`, `lat`, `lon`, `snr_db`, `key`/`X-API-Key`). No new FreqTank server code.
+- **No FreqTank-side changes beyond the audio-classification fields.** The uploader posts to
+  FreqTank's existing `POST /api/field-recordings/upload` — the same endpoint Field Scanner
+  already uses, with the same multipart contract (`audio`, `frequency_hz`, `mode_key`,
+  `started_at`, `duration_ms`, `lat`, `lon`, `snr_db`, `key`/`X-API-Key`) plus two new
+  optional fields (`audio_class`, `audio_subclass`) — see "FreqTank-side changes" below for
+  the full (small) extent of it. No other FreqTank server/client behavior changes.
 - **No remote-config API yet.** All new settings are configured through sdr-monitor's own
   local web UI (extending the existing `AppSettingsForm`) in this pass. A remote HTTP API for
   FreqTank to read/write these settings is Part 3's job, not this plan's.
@@ -144,10 +154,16 @@ New `sdr/utils/freqtank_uploader.py`, structured identically to the existing
   `middle_frequency()`), `mode_key` (`group.modulation`), `started_at` (`begin_date`, ISO 8601
   or epoch ms — match whatever FreqTank's existing route parses; verify against
   freqtank/server/src/routes/fieldRecordings.ts at implementation time), `duration_ms`
-  (`duration()` in ms), `lat`/`lon` (the new fields, omitted if `None`), and — since
-  FreqTank's upload route doesn't have a dedicated audio-class field — pack the AI
-  classification into a value the upload contract already accepts, or leave it for Part 4 to
-  decide how to carry across (**open question, see below**).
+  (`duration()` in ms), `lat`/`lon` (the new fields, omitted if `None`), and
+  `audio_class`/`audio_subclass` (from the transmission's already-computed `audio_class`
+  relation — `Speech`/`Music`/`Noise`/`Unknown` and the finer YAMNet label; omitted if the
+  row hasn't been classified yet, see the query change below).
+- **Query change to wait for classification**: in addition to the staleness/modulation/
+  not-yet-uploaded filters above, also require `audio_class_id != default_audio_class_id`
+  (i.e. `ClassifierController` has already tagged it). The 10-second staleness window this
+  plan already uses means classification has very likely already happened or arrives within
+  the uploader's own next poll — so recordings are almost never held back noticeably, and
+  every upload carries a real classification instead of racing it.
 - On success (2xx): set `uploaded_at = now()` and save. On failure: leave `uploaded_at` null
   so the next poll retries it (no separate retry/backoff bookkeeping needed — matches the
   simplicity of the existing `Cleaner`/`ClassifierController` threads, which also just retry
@@ -163,22 +179,35 @@ New `sdr/utils/freqtank_uploader.py`, structured identically to the existing
   final image with `--build-arg SDR_MONITOR_IMAGE=<our custom-built tag>` against upstream's
   own Dockerfile logic, just forking to touch this single config line.
 
-### Open question: how does `audio_class` reach FreqTank in this pass?
+### FreqTank-side changes (in scope for this plan)
 
-FreqTank's existing upload endpoint has no field for it. Two options, to be resolved before
-or during implementation (not blocking the rest of this design):
-1. **Skip it in this pass.** Upload without the classification; Part 4's own design (FreqTank
-   Field Recordings filter) decides then whether to extend the upload contract or backfill.
-2. **Wait for classification before uploading.** Change the uploader's query to also require
-   `audio_class_id != default_audio_class_id` (i.e. wait until `ClassifierController` has
-   already tagged it, which the design's own 10-second staleness window makes likely to
-   already be true or arrive shortly after), and encode the class into a field the existing
-   upload contract *does* accept as a stretch (there isn't a clean one — this option is
-   weaker than it looks).
+Per explicit direction: carry the AI classification through now and build the Field
+Recordings filter now too, rather than deferring to a later pass. This is the one place this
+plan touches the `freqtank` repo — small, and shaped exactly like the `ownerId` filter added
+earlier this project (new nullable columns, accept on write, expose and filter on read).
 
-Recommendation: **Option 1** — upload without the classification now, let Part 2/3's actual
-FreqTank-side integration work decide how to extend the contract (a new optional multipart
-field is a small, natural addition to make *there*, not something to hack around here).
+**Server (`freqtank/server`):**
+- Migration: add `audio_class TEXT NULL` and `audio_subclass TEXT NULL` to `field_recordings`.
+- `POST /api/field-recordings/upload` (`handleFieldRecordingUpload` in
+  `server/src/routes/fieldRecordings.ts`): accept optional `audio_class`/`audio_subclass`
+  form fields (both `undefined` is fine — Field Scanner never sends them, so this must stay
+  fully optional and backward compatible), pass through to the `INSERT`, include in the
+  broadcast payload.
+- `GET /api/field-recordings`: add `audio_class` to the `selectCols`/response shape, and a new
+  optional `audioClass` query filter (`AND fr.audio_class = ${audioClass}`), matching the
+  existing `sourceId`/`ownerId` filter pattern exactly.
+- Shared type (`shared/src/types.ts`): add `audioClass: string | null` and
+  `audioSubclass: string | null` to `FieldRecording`, and `audioClass?: string` to
+  `FieldRecordingFilters`.
+
+**Client (`freqtank/client`):**
+- New filter dropdown on the Field Recordings page (the list-view page from the previous
+  project phase): **Voice / Noise / Music / Unknown / All**, alongside the existing Agent and
+  Contributor filters, same `<select>` styling convention, same page-reset-on-change
+  behavior. Options are fixed (the four classification buckets `sdr-monitor`'s classifier
+  already produces), not fetched from an API.
+- Show `audioClass` in the `FieldRecordingRow`/detail modal metadata where it's set (omit the
+  line entirely when null, e.g. for Field Scanner recordings, which never populate this).
 
 ## Testing
 
@@ -188,8 +217,18 @@ field is a small, natural addition to make *there*, not something to hack around
   tests with known coordinate pairs); `GeofenceController`'s debounce logic (mock
   `get_current_location`, assert MQTT publish only fires after N consistent samples, not
   before); `FreqTankUploader`'s query (only picks up stale + FM/AM + not-yet-uploaded rows)
-  and its retry-on-failure behavior (a failed POST leaves `uploaded_at` null).
+  and its retry-on-failure behavior (a failed POST leaves `uploaded_at` null); the query's
+  "wait for classification" condition (a row past staleness but still unclassified is not
+  yet picked up).
 - Manual/integration verification against a real device: confirm GPS coordinates land on new
   `Transmission` rows, confirm a geofence transition actually pauses/resumes real scanning
   (watch for the device's `enabled` state to flip in sdr-monitor's own Config page), confirm
-  an uploaded recording actually appears in FreqTank's Field Recordings list.
+  an uploaded recording actually appears in FreqTank's Field Recordings list with its
+  classification set.
+- `freqtank/server`: extend `fieldRecordingsQuery.test.ts`/the upload route's existing test
+  coverage for `audio_class`/`audio_subclass` — round-trips through upload → GET, the new
+  `audioClass` filter narrows results, and (critically) an upload **without** these fields
+  still succeeds exactly as before (Field Scanner's existing uploads never send them).
+- `freqtank/client`: extend `FieldRecordingsPage.test.tsx`/`FieldRecordingRow.test.tsx` for
+  the new filter dropdown and the classification display, following the same patterns the
+  Agent/Contributor filters and row metadata already use.
