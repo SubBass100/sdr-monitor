@@ -18,10 +18,17 @@ class GeofenceController(threading.Thread):
     # believes the pause is in effect and, without this reassertion, would never
     # re-publish it - silently resuming scanning inside the fence until the
     # geofence state next changes (which may be never, if the device doesn't
-    # leave). So every this-many debounced polls we re-publish the currently
-    # desired state even though nothing changed, to bound how long that drift can
-    # persist. Not a specific/tuned number - just a small constant that keeps the
-    # staleness window bounded without re-publishing on every single poll.
+    # leave). So every this-many debounced polls while paused, we re-publish the
+    # pause even though nothing changed, to bound how long that drift can persist.
+    # Not a specific/tuned number - just a small constant that keeps the staleness
+    # window bounded without re-publishing on every single poll.
+    #
+    # Deliberately scoped to the paused state only (see the `outside is False`
+    # check where this is used) - a restart always comes back up scanning (the
+    # persisted config), so there's nothing to correct on that side, and
+    # reasserting there would periodically republish sdr/reset_tmp_config/<id> on
+    # the same channel gain_tester_thread.py uses to run gain tests, which could
+    # reset a gain test's applied config out from under it for no reason.
     __REASSERT_EVERY_N_POLLS = 10
 
     def __init__(self):
@@ -138,7 +145,17 @@ class GeofenceController(threading.Thread):
                 if self.__consistent_count >= debounce:
                     if self.__applied_state != outside:
                         self.__apply_and_reset_counter(outside, client)
-                    else:
+                    elif outside is False:
+                        # Only the paused state needs periodic reassertion (see the
+                        # class-level comment on __REASSERT_EVERY_N_POLLS): a restarted
+                        # scanner container always comes back up on its *persisted*
+                        # config, which has devices enabled - i.e. it restarts straight
+                        # into the "scanning" state, so there's nothing to correct
+                        # there. Reasserting while already scanning would instead
+                        # periodically republish sdr/reset_tmp_config/<id> for no
+                        # reason, which is the same channel gain_tester_thread.py uses
+                        # to run gain tests - doing so could reset a gain test's
+                        # applied config out from under it.
                         self.__polls_since_apply += 1
                         if self.__polls_since_apply >= self.__REASSERT_EVERY_N_POLLS:
                             self.__apply_and_reset_counter(outside, client)

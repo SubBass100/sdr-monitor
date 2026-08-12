@@ -136,16 +136,56 @@ class GeofenceControllerTestCase(TestCase):
     @patch.object(GeofenceController, "_GeofenceController__apply")
     @patch("sdr.utils.geofence_controller.Location")
     @patch("sdr.utils.geofence_controller.AppSettings")
-    def test_reasserts_applied_state_periodically_even_without_a_transition(self, mock_app_settings, mock_location_cls, mock_apply, mock_mqtt_cls):
+    def test_reasserts_paused_state_periodically_even_without_a_transition(self, mock_app_settings, mock_location_cls, mock_apply, mock_mqtt_cls):
         # tmp_config is not persisted by the scanner and __applied_state only lives in
-        # this thread's memory, so if the scanner restarts while we believe a state is
-        # already applied, nothing would otherwise ever re-publish it. Confirms `run()`
-        # re-invokes `__apply` for the *same* desired state once enough consistent
-        # polls have elapsed since the last apply, even though `__applied_state`
-        # already matches and no transition occurred.
+        # this thread's memory, so if the scanner restarts while paused (inside the
+        # geofence), it comes back up on its persisted (enabled/scanning) config and
+        # nothing would otherwise ever re-publish the pause. Confirms `run()` re-invokes
+        # `__apply` for the *same* desired "paused" state once enough consistent polls
+        # have elapsed since the last apply, even though `__applied_state` already
+        # matches and no transition occurred.
         debounce = 1
         mock_app_settings.get.side_effect = self.__settings(debounce)
         mock_location = MagicMock()
+        # exactly at the (0, 0) geofence center configured above -> always "inside" (paused).
+        mock_location.get_current_location.return_value = (0.0, 0.0)
+        mock_location_cls.return_value = mock_location
+        mock_client = MagicMock()
+        mock_mqtt_cls.return_value = mock_client
+
+        controller = GeofenceController()
+        mock_apply.side_effect = lambda scanning_enabled, client: setattr(controller, "_GeofenceController__applied_state", scanning_enabled)
+        reassert_interval = GeofenceController._GeofenceController__REASSERT_EVERY_N_POLLS
+
+        # First poll applies the transition (debounce=1).
+        self.__run_iterations(controller, 1)
+        mock_apply.assert_called_once_with(False, mock_client)
+
+        # One poll short of the reassertion interval: no re-publish yet.
+        self.__run_iterations(controller, reassert_interval - 1)
+        mock_apply.assert_called_once()
+
+        # The poll that crosses the reassertion interval re-fires apply for the same
+        # (unchanged) desired "paused" state.
+        self.__run_iterations(controller, 1)
+        self.assertEqual(mock_apply.call_count, 2)
+
+    @patch("sdr.utils.geofence_controller.MqttSyncClient")
+    @patch.object(GeofenceController, "_GeofenceController__apply")
+    @patch("sdr.utils.geofence_controller.Location")
+    @patch("sdr.utils.geofence_controller.AppSettings")
+    def test_does_not_reassert_while_desired_state_is_scanning(self, mock_app_settings, mock_location_cls, mock_apply, mock_mqtt_cls):
+        # The periodic reassertion exists to correct a scanner restarting while
+        # paused and coming back up already-scanning (the persisted config always has
+        # devices enabled). While the desired state is "outside" (scanning), a restart
+        # would already restart into the desired state, so there's nothing to correct
+        # - and reasserting there would periodically republish
+        # sdr/reset_tmp_config/<id>, a channel gain_tester_thread.py also uses to run
+        # gain tests, resetting an in-progress gain test's config for no reason.
+        debounce = 1
+        mock_app_settings.get.side_effect = self.__settings(debounce)
+        mock_location = MagicMock()
+        # far from the (0, 0) geofence center configured above -> always "outside" (scanning).
         mock_location.get_current_location.return_value = (10.0, 10.0)
         mock_location_cls.return_value = mock_location
         mock_client = MagicMock()
@@ -157,16 +197,13 @@ class GeofenceControllerTestCase(TestCase):
 
         # First poll applies the transition (debounce=1).
         self.__run_iterations(controller, 1)
-        mock_apply.assert_called_once()
+        mock_apply.assert_called_once_with(True, mock_client)
 
-        # One poll short of the reassertion interval: no re-publish yet.
-        self.__run_iterations(controller, reassert_interval - 1)
+        # Many further consistent "outside" (scanning) polls, well past the
+        # reassertion interval - must NOT re-fire apply, since only the paused state
+        # is periodically reasserted.
+        self.__run_iterations(controller, reassert_interval * 3)
         mock_apply.assert_called_once()
-
-        # The poll that crosses the reassertion interval re-fires apply for the same
-        # (unchanged) desired state.
-        self.__run_iterations(controller, 1)
-        self.assertEqual(mock_apply.call_count, 2)
 
 
 class GeofenceControllerApplyTestCase(TestCase):
