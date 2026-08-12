@@ -12,6 +12,7 @@ def run(*args):
     parser.add_argument("-r", "--reader", help="enable reader", action="store_true")
     parser.add_argument("-clr", "--cleaner", help="enable cleaner", action="store_true")
     parser.add_argument("-cls", "--classifier", help="enable classifier", action="store_true")
+    parser.add_argument("-gf", "--geofence", help="enable geofence controller", action="store_true")
     args = parser.parse_args(shlex.split(args[0] if len(args) else ""))
 
     threads = []
@@ -24,6 +25,13 @@ def run(*args):
             from sdr.utils.classifier_controller import ClassifierController
 
             threads.append(ClassifierController())
+        except Exception as e:
+            logging.getLogger("Worker").warning("exception: %s" % e)
+    if args.geofence:
+        try:
+            from sdr.utils.geofence_controller import GeofenceController
+
+            threads.append(GeofenceController())
         except Exception as e:
             logging.getLogger("Worker").warning("exception: %s" % e)
 
