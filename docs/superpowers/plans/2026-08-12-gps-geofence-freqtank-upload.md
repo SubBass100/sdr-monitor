@@ -267,23 +267,30 @@ Add `import sdr.utils.location` to this file's import block (alongside the exist
 
 - [ ] **Step 7: Write tests**
 
-Add `sdr/tests/test_location.py` (check whether `sdr/tests/` already exists as a directory or
-if tests live elsewhere in this project first — Django's default is `sdr/tests.py` or a
-`sdr/tests/` package; match whatever's already there, or Django's default single-file
-convention if there's genuinely no existing test infrastructure to match). Cover:
-`get_current_location()` returns `(MANUAL_LAT, MANUAL_LON)` when `LOCATION_SOURCE=manual`
-(mock `AppSettings.get`); returns `None` gracefully (not an exception) when GPSD is
-unreachable/`GPSDClient` raises, with `LOCATION_SOURCE=gps`.
+This project's only existing test (`sdr/utils/test.py`, a `django.test.TestCase` covering
+`sdr/utils/device.py`) confirms the convention: Django's built-in test runner
+(`python manage.py test`), plain `TestCase` classes, test file living next to the module it
+covers. Since that file is literally named `test.py` (not `test_device.py`), a second file in
+the same directory needs a distinct name to avoid colliding with it — use `test_location.py`
+(Django's default discovery pattern is `test*.py`, so this is picked up automatically, no
+settings change needed). `DATABASES` defaults to local `sqlite3` when `DATABASE_ENGINE` is
+unset, so `manage.py test` needs no external Postgres to run.
 
-Add a test to wherever `transmission_reader.py`'s existing tests live (search for one first —
-it may not have any yet, in which case write the file fresh): a new-transmission MQTT message
-results in `lat`/`lon` populated from a mocked `get_current_location()`; an
-existing-transmission chunk-append does **not** re-stamp/change `lat`/`lon`.
+Add `sdr/utils/test_location.py`. Cover: `get_current_location()` returns
+`(MANUAL_LAT, MANUAL_LON)` when `LOCATION_SOURCE=manual` (mock `AppSettings.get`); returns
+`None` gracefully (not an exception) when GPSD is unreachable/`GPSDClient` raises, with
+`LOCATION_SOURCE=gps`.
+
+Add `sdr/utils/test_transmission_reader.py` (this module has no existing test to extend): a
+new-transmission MQTT message results in `lat`/`lon` populated from a mocked
+`get_current_location()`; an existing-transmission chunk-append does **not** re-stamp/change
+`lat`/`lon`.
 
 - [ ] **Step 8: Run tests, verify pass, commit**
 
 ```bash
-git add requirements.txt Dockerfile sdr/utils/location.py sdr/models.py sdr/migrations/ sdr/utils/transmission_reader.py sdr/tests/
+python manage.py test sdr.utils.test_location sdr.utils.test_transmission_reader
+git add requirements.txt Dockerfile sdr/utils/location.py sdr/models.py sdr/migrations/ sdr/utils/transmission_reader.py sdr/utils/test_location.py sdr/utils/test_transmission_reader.py
 git commit -m "feat: add live GPS tagging for new transmissions"
 ```
 
@@ -461,19 +468,23 @@ In `scripts/monitor_worker.py`, mirror the `--classifier`/`-cls` block exactly f
 
 - [ ] **Step 5: Write tests**
 
-`geofence.distance_m`/`is_outside_geofence`: known coordinate pairs (e.g. two points ~1km
-apart, assert distance is within a few meters of the expected value; a point exactly at the
-center is never outside; a point far away always is). `GeofenceController`'s debounce: mock
-`Location.get_current_location` to return a fixed "outside" location for N-1 polls then
-assert `__apply`/the MQTT client is NOT yet called, then one more consistent poll and assert
-it IS called exactly once (not called again on subsequent still-consistent polls, since
-`__applied_state` already matches). Mock `AppSettings.get` throughout rather than touching the
-real DB-backed settings store.
+Add `sdr/utils/test_geofence.py` and `sdr/utils/test_geofence_controller.py` (same
+`test_<module>.py` convention as Task 2 — plain `django.test.TestCase`, discovered by
+`manage.py test` automatically, no new test infrastructure needed).
+
+`test_geofence.py`: known coordinate pairs (e.g. two points ~1km apart, assert distance is
+within a few meters of the expected value; a point exactly at the center is never outside; a
+point far away always is). `test_geofence_controller.py`: mock `Location.get_current_location`
+to return a fixed "outside" location for N-1 polls then assert `__apply`/the MQTT client is
+NOT yet called, then one more consistent poll and assert it IS called exactly once (not called
+again on subsequent still-consistent polls, since `__applied_state` already matches). Mock
+`AppSettings.get` throughout rather than touching the real DB-backed settings store.
 
 - [ ] **Step 6: Run tests, verify pass, commit**
 
 ```bash
-git add sdr/utils/geofence.py sdr/utils/geofence_controller.py scripts/monitor_worker.py sdr/tests/
+python manage.py test sdr.utils.test_geofence sdr.utils.test_geofence_controller
+git add sdr/utils/geofence.py sdr/utils/geofence_controller.py sdr/utils/test_geofence.py sdr/utils/test_geofence_controller.py scripts/monitor_worker.py
 git commit -m "feat: add geofence-gated scanning via live scanner pause/resume"
 ```
 
@@ -622,17 +633,21 @@ Mirror the `--classifier`/`-cls` block exactly (same shape as Task 3 Step 4):
 
 - [ ] **Step 6: Write tests**
 
-Mock `requests.post` and `decode_audio`. Cover: a stale + FM/AM + classified + not-yet-
-uploaded transmission gets uploaded, `uploaded_at` set on success; a transmission missing any
-one of those conditions (too fresh, wrong modulation, unclassified, already uploaded) is
-skipped; a failed POST (mock a non-2xx response or an exception) leaves `uploaded_at` null so
-it's retried; `FREQTANK_UPLOAD_MODE != "auto"` uploads nothing at all; the temp WAV file is
-cleaned up (removed) whether the upload succeeds or fails.
+Add `sdr/utils/test_freqtank_uploader.py` (same `test_<module>.py` convention). Mock
+`requests.post` and `decode_audio`. Cover: a stale + FM/AM + classified + not-yet-uploaded
+transmission gets uploaded, `uploaded_at` set on success; a transmission missing any one of
+those conditions (too fresh, wrong modulation, unclassified, already uploaded) is skipped; a
+failed POST (mock a non-2xx response or an exception) leaves `uploaded_at` null so it's
+retried; `FREQTANK_UPLOAD_MODE != "auto"` uploads nothing at all; the temp WAV file is cleaned
+up (removed) whether the upload succeeds or fails; the `started_at` field sent is epoch
+milliseconds (`str(int(...))`, not an ISO date string — this is a real backward-compat
+requirement against FreqTank's actual route, not a style preference).
 
 - [ ] **Step 7: Run tests, verify pass, commit**
 
 ```bash
-git add requirements.txt sdr/utils/freqtank_uploader.py sdr/models.py sdr/migrations/ scripts/monitor_worker.py sdr/tests/
+python manage.py test sdr.utils.test_freqtank_uploader
+git add requirements.txt sdr/utils/freqtank_uploader.py sdr/models.py sdr/migrations/ scripts/monitor_worker.py sdr/utils/test_freqtank_uploader.py
 git commit -m "feat: add automatic FreqTank upload for finished recordings"
 ```
 
