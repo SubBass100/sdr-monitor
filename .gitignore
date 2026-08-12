@@ -6,3 +6,4 @@ data
 patches
 static/libs
 tools
+venv
