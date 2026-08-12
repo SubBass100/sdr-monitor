@@ -83,6 +83,8 @@ class Transmission(models.Model):
     group = models.ForeignKey(Group, on_delete=models.CASCADE, default=get_default_group_id)
     device = models.ForeignKey(Device, on_delete=models.CASCADE, default=get_default_device_id)
     source = models.CharField("Source", max_length=255)
+    lat = models.FloatField("Latitude", null=True, blank=True)
+    lon = models.FloatField("Longitude", null=True, blank=True)
 
     def duration(self):
         return timedelta(seconds=round((self.end_date - self.begin_date).total_seconds()))

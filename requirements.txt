@@ -9,6 +9,7 @@ django-admin-tools
 django-crispy-forms
 django-extensions
 django-templates-macros
+gpsdclient
 gunicorn
 humanize
 matplotlib

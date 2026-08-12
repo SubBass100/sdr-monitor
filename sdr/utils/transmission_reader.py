@@ -11,6 +11,7 @@ import re
 import sdr.utils.device
 import sdr.utils.file
 import sdr.utils.group
+import sdr.utils.location
 
 
 class TransmissionReader:
@@ -57,6 +58,7 @@ class TransmissionReader:
             )
             t.end_date = dt
         except Transmission.DoesNotExist:
+            location = sdr.utils.location.Location().get_current_location()
             dir = "device_%d/transmission" % device.id
             (filename, filename_full) = sdr.utils.file.get_filename(dir, dt, "%s_%d_%s.bin" % (dt.strftime("%H_%M_%S"), (begin_frequency + end_frequency) // 2, sample_type), True)
             t = Transmission.objects.create(
@@ -70,6 +72,8 @@ class TransmissionReader:
                 data_type=sample_type,
                 group_id=group_id,
                 source=source,
+                lat=location[0] if location else None,
+                lon=location[1] if location else None,
             )
         self.__logger.debug("new size: %d = %d x %d, size: %s" % (len(samples), len(samples) / sample_size, sample_size, naturalsize(sample_size)))
         with open(t.data_file.path, "ab") as file:
