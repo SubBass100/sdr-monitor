@@ -18,4 +18,5 @@ OpenImageIO
 paho-mqtt
 Pillow
 psycopg
+requests
 tzlocal

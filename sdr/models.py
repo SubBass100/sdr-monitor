@@ -85,6 +85,7 @@ class Transmission(models.Model):
     source = models.CharField("Source", max_length=255)
     lat = models.FloatField("Latitude", null=True, blank=True)
     lon = models.FloatField("Longitude", null=True, blank=True)
+    uploaded_at = models.DateTimeField("Uploaded at", null=True, blank=True)
 
     def duration(self):
         return timedelta(seconds=round((self.end_date - self.begin_date).total_seconds()))
