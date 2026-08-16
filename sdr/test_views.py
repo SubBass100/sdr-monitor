@@ -22,6 +22,9 @@ class FreqtankSettingsViewTestCase(TestCase):
             username=self.username, email="admin@example.com", password=self.password
         )
 
+    def test_url_is_mounted_at_root_not_under_sdr_prefix(self):
+        self.assertEqual(self.url, "/api/freqtank-settings")
+
     def __put(self, body, auth_header=None):
         kwargs = {"content_type": "application/json"}
         if auth_header is not None:
