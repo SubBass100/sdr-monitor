@@ -20,7 +20,7 @@ class AppSettingsKey(Enum):
     GEOFENCE_RECHECK_INTERVAL_MS = ("geofence_recheck_interval_ms", 30000, int)
     FREQTANK_SERVER_URL = ("freqtank_server_url", "", str)
     FREQTANK_API_KEY = ("freqtank_api_key", "", str)
-    FREQTANK_UPLOAD_MODE = ("freqtank_upload_mode", "off", str)
+    FREQTANK_UPLOAD_MODE = ("freqtank_upload_mode", "off", str)  # valid values: "off", "auto" (see AppSettingsForm.freqtank_upload_mode's choices)
     FREQTANK_CHECK_INTERVAL_MS = ("freqtank_check_interval_ms", 5000, int)
 
     def __init__(self, key: str, default, cast):
@@ -61,7 +61,7 @@ class AppSettingsForm(forms.Form):
     geofence_recheck_interval_ms = forms.IntegerField(label="Geofence recheck interval (ms)")
     freqtank_server_url = forms.CharField(label="FreqTank server URL", required=False)
     freqtank_api_key = forms.CharField(label="FreqTank API key", required=False, widget=forms.PasswordInput(render_value=True))
-    freqtank_upload_mode = forms.ChoiceField(label="FreqTank upload mode", choices=[("off", "Off"), ("auto", "Automatic"), ("direct", "Direct")])
+    freqtank_upload_mode = forms.ChoiceField(label="FreqTank upload mode", choices=[("off", "Off"), ("auto", "Automatic")])
     freqtank_check_interval_ms = forms.IntegerField(label="FreqTank check interval (ms)")
 
     def load_initial(self):

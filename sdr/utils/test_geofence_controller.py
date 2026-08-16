@@ -205,6 +205,96 @@ class GeofenceControllerTestCase(TestCase):
         self.__run_iterations(controller, reassert_interval * 3)
         mock_apply.assert_called_once()
 
+    @patch("sdr.utils.geofence_controller.MqttSyncClient")
+    @patch.object(GeofenceController, "_GeofenceController__apply")
+    @patch("sdr.utils.geofence_controller.Location")
+    @patch("sdr.utils.geofence_controller.AppSettings")
+    def test_resumes_when_mode_leaves_geofence_while_paused(self, mock_app_settings, mock_location_cls, mock_apply, mock_mqtt_cls):
+        # If AUTO_SCAN_MODE is switched away from "geofence" (to "manual" or "boot",
+        # both meant to be "always-on scanning") while the controller currently has the
+        # scanner paused, nothing else ever resumes it - __evaluate() would just start
+        # returning None every poll from here on, and the `outside is None` branch only
+        # resets debounce bookkeeping. Confirms `run()` issues a resume itself in that
+        # case instead of leaving the scanner stuck paused forever.
+        mode = ["geofence"]
+        values = {
+            AppSettingsKey.GEOFENCE_RADIUS_M: 100,
+            AppSettingsKey.GEOFENCE_CENTER_LAT: 0.0,
+            AppSettingsKey.GEOFENCE_CENTER_LON: 0.0,
+            AppSettingsKey.GEOFENCE_DEBOUNCE_SAMPLES: 1,
+            AppSettingsKey.GEOFENCE_RECHECK_INTERVAL_MS: 1,
+        }
+
+        def get_setting(key):
+            if key == AppSettingsKey.AUTO_SCAN_MODE:
+                return mode[0]
+            return values[key]
+
+        mock_app_settings.get.side_effect = get_setting
+        mock_location = MagicMock()
+        # exactly at the (0, 0) geofence center configured above -> always "inside" (paused).
+        mock_location.get_current_location.return_value = (0.0, 0.0)
+        mock_location_cls.return_value = mock_location
+        mock_client = MagicMock()
+        mock_mqtt_cls.return_value = mock_client
+
+        controller = GeofenceController()
+        mock_apply.side_effect = lambda scanning_enabled, client: setattr(controller, "_GeofenceController__applied_state", scanning_enabled)
+
+        # First poll (debounce=1) applies the pause.
+        self.__run_iterations(controller, 1)
+        mock_apply.assert_called_once_with(False, mock_client)
+
+        # Operator switches auto-scan mode away from "geofence" while paused.
+        mode[0] = "manual"
+        self.__run_iterations(controller, 1)
+
+        self.assertEqual(mock_apply.call_count, 2)
+        mock_apply.assert_called_with(True, mock_client)
+        self.assertEqual(controller._GeofenceController__applied_state, True)
+
+    @patch("sdr.utils.geofence_controller.MqttSyncClient")
+    @patch.object(GeofenceController, "_GeofenceController__apply")
+    @patch("sdr.utils.geofence_controller.Location")
+    @patch("sdr.utils.geofence_controller.AppSettings")
+    def test_does_not_resume_when_mode_leaves_geofence_while_already_scanning(self, mock_app_settings, mock_location_cls, mock_apply, mock_mqtt_cls):
+        # Sanity check for the fix above: if the controller was already scanning (not
+        # paused) when geofence mode is turned off, there's nothing to resume - apply
+        # must not fire just because the mode changed.
+        mode = ["geofence"]
+        values = {
+            AppSettingsKey.GEOFENCE_RADIUS_M: 100,
+            AppSettingsKey.GEOFENCE_CENTER_LAT: 0.0,
+            AppSettingsKey.GEOFENCE_CENTER_LON: 0.0,
+            AppSettingsKey.GEOFENCE_DEBOUNCE_SAMPLES: 1,
+            AppSettingsKey.GEOFENCE_RECHECK_INTERVAL_MS: 1,
+        }
+
+        def get_setting(key):
+            if key == AppSettingsKey.AUTO_SCAN_MODE:
+                return mode[0]
+            return values[key]
+
+        mock_app_settings.get.side_effect = get_setting
+        mock_location = MagicMock()
+        # far from the (0, 0) geofence center configured above -> always "outside" (scanning).
+        mock_location.get_current_location.return_value = (10.0, 10.0)
+        mock_location_cls.return_value = mock_location
+        mock_client = MagicMock()
+        mock_mqtt_cls.return_value = mock_client
+
+        controller = GeofenceController()
+        mock_apply.side_effect = lambda scanning_enabled, client: setattr(controller, "_GeofenceController__applied_state", scanning_enabled)
+
+        # First poll (debounce=1) applies the "scanning" state.
+        self.__run_iterations(controller, 1)
+        mock_apply.assert_called_once_with(True, mock_client)
+
+        mode[0] = "manual"
+        self.__run_iterations(controller, 5)
+
+        mock_apply.assert_called_once()
+
 
 class GeofenceControllerApplyTestCase(TestCase):
     def __client_replying_with_scanner_id(self, scanner_id="scanner1"):

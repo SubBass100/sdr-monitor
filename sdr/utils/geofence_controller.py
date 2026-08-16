@@ -42,9 +42,6 @@ class GeofenceController(threading.Thread):
         self.__polls_since_apply = 0
 
     def __evaluate(self):
-        mode = AppSettings.get(AppSettingsKey.AUTO_SCAN_MODE)
-        if mode != "geofence":
-            return None
         radius_m = AppSettings.get(AppSettingsKey.GEOFENCE_RADIUS_M)
         if radius_m <= 0:
             return None
@@ -131,34 +128,50 @@ class GeofenceController(threading.Thread):
         client = MqttSyncClient(settings.MQTT["url"], settings.MQTT["user"], settings.MQTT["password"], "geofence")
         client.start()
         while self.__is_running:
-            outside = self.__evaluate()
-            if outside is None:
+            mode = AppSettings.get(AppSettingsKey.AUTO_SCAN_MODE)
+            if mode != "geofence":
+                # "manual" and "boot" both mean "always-on scanning, unaffected by the
+                # geofence" - there's no desired-state evaluation to debounce while
+                # geofence mode isn't active, so reset that bookkeeping same as an
+                # indeterminate `__evaluate()` result would. But if this controller had
+                # previously paused the scanner (__applied_state is False) while
+                # geofence mode *was* active, that pause must not outlive geofence mode
+                # being turned off - nothing else in this controller will ever resume
+                # it once we stop polling __evaluate(), so resume it here before going
+                # idle.
                 self.__consistent_count = 0
                 self.__last_state = None
+                if self.__applied_state is False:
+                    self.__apply_and_reset_counter(True, client)
             else:
-                if outside == self.__last_state:
-                    self.__consistent_count += 1
+                outside = self.__evaluate()
+                if outside is None:
+                    self.__consistent_count = 0
+                    self.__last_state = None
                 else:
-                    self.__last_state = outside
-                    self.__consistent_count = 1
-                debounce = AppSettings.get(AppSettingsKey.GEOFENCE_DEBOUNCE_SAMPLES)
-                if self.__consistent_count >= debounce:
-                    if self.__applied_state != outside:
-                        self.__apply_and_reset_counter(outside, client)
-                    elif outside is False:
-                        # Only the paused state needs periodic reassertion (see the
-                        # class-level comment on __REASSERT_EVERY_N_POLLS): a restarted
-                        # scanner container always comes back up on its *persisted*
-                        # config, which has devices enabled - i.e. it restarts straight
-                        # into the "scanning" state, so there's nothing to correct
-                        # there. Reasserting while already scanning would instead
-                        # periodically republish sdr/reset_tmp_config/<id> for no
-                        # reason, which is the same channel gain_tester_thread.py uses
-                        # to run gain tests - doing so could reset a gain test's
-                        # applied config out from under it.
-                        self.__polls_since_apply += 1
-                        if self.__polls_since_apply >= self.__REASSERT_EVERY_N_POLLS:
+                    if outside == self.__last_state:
+                        self.__consistent_count += 1
+                    else:
+                        self.__last_state = outside
+                        self.__consistent_count = 1
+                    debounce = AppSettings.get(AppSettingsKey.GEOFENCE_DEBOUNCE_SAMPLES)
+                    if self.__consistent_count >= debounce:
+                        if self.__applied_state != outside:
                             self.__apply_and_reset_counter(outside, client)
+                        elif outside is False:
+                            # Only the paused state needs periodic reassertion (see the
+                            # class-level comment on __REASSERT_EVERY_N_POLLS): a restarted
+                            # scanner container always comes back up on its *persisted*
+                            # config, which has devices enabled - i.e. it restarts straight
+                            # into the "scanning" state, so there's nothing to correct
+                            # there. Reasserting while already scanning would instead
+                            # periodically republish sdr/reset_tmp_config/<id> for no
+                            # reason, which is the same channel gain_tester_thread.py uses
+                            # to run gain tests - doing so could reset a gain test's
+                            # applied config out from under it.
+                            self.__polls_since_apply += 1
+                            if self.__polls_since_apply >= self.__REASSERT_EVERY_N_POLLS:
+                                self.__apply_and_reset_counter(outside, client)
             interval_ms = AppSettings.get(AppSettingsKey.GEOFENCE_RECHECK_INTERVAL_MS)
             time.sleep(max(1, interval_ms / 1000))
         client.stop()
