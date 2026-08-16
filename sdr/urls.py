@@ -20,4 +20,6 @@ urlpatterns = [
     path("gain_tests/", sdr.views.gain_tests, name="sdr_gain_tests"),
     path("gain_test/<int:gain_test_id>/", sdr.views.gain_test, name="sdr_gain_test"),
     path("settings/", sdr.views.settings, name="sdr_settings"),
+    # JSON API route (not a session-authenticated sdr_*-named web-UI view above).
+    path("api/freqtank-settings", sdr.views.freqtank_settings, name="freqtank_settings"),
 ]

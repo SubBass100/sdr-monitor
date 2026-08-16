@@ -2,6 +2,7 @@ from common.helpers import *
 from django import forms
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
+from django.contrib.auth import authenticate
 from django.contrib.auth.decorators import login_required, permission_required
 from django.core.paginator import Paginator
 from django.db.models import F, Count, Min, Max
@@ -10,12 +11,16 @@ from django.http import Http404
 from django.http import JsonResponse
 from django.shortcuts import render, redirect
 from django.utils.timezone import localtime
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
 from sdr.app_settings import *
 from sdr.models import *
 from sdr.signals import *
+import base64
 import common.helpers
 import common.utils.files
 import common.utils.filters
+import json
 import math
 import monitor.settings
 import numpy as np
@@ -334,3 +339,39 @@ def settings(request):
         form = AppSettingsForm()
         form.load_initial()
     return render(request, "app_settings.html", {"form": form})
+
+
+# Machine JSON API endpoint (no session cookie, no CSRF token) — see the rest of this file's
+# session-authenticated, @login_required()/@staff_member_required()-gated web-UI views for
+# contrast.
+def _authenticate_basic(request):
+    header = request.META.get("HTTP_AUTHORIZATION", "")
+    if not header.startswith("Basic "):
+        return None
+    try:
+        decoded = base64.b64decode(header[len("Basic ") :]).decode("utf-8")
+        username, password = decoded.split(":", 1)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    user = authenticate(username=username, password=password)
+    return user if user is not None and user.is_active and user.is_superuser else None
+
+
+@csrf_exempt
+@require_http_methods(["PUT"])
+def freqtank_settings(request):
+    user = _authenticate_basic(request)
+    if user is None:
+        return JsonResponse({"error": "unauthorized"}, status=401)
+    try:
+        data = json.loads(request.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+    server_url = data.get("server_url")
+    api_key = data.get("api_key")
+    if not server_url or not api_key:
+        return JsonResponse({"error": "server_url and api_key are required"}, status=400)
+    AppSettings.set(AppSettingsKey.FREQTANK_SERVER_URL, server_url)
+    AppSettings.set(AppSettingsKey.FREQTANK_API_KEY, api_key)
+    AppSettings.set(AppSettingsKey.FREQTANK_UPLOAD_MODE, "auto")
+    return JsonResponse({"status": "ok"})
